@@ -9,6 +9,8 @@ from io import BytesIO
 from bs4 import BeautifulSoup
 from urllib.request import Request, urlopen
 from zipfile import ZipFile
+from zipfile import error
+from tqdm import tqdm
 import glob
 import sys
 import csv
@@ -26,15 +28,19 @@ def download_rruff_from_url(url):
         os.makedirs('rruff_data')
     # Extract RRUFF spectrum type
     dir_name = 'rruff_data/' + re.split('/', url)[-1].split('.')[0]
-    print('Downloading', url)
-    print('Extracting into ./ruff_data/', dir_name, sep='')
     # Open, read, and extract zip into directory
     with urlopen(url) as zp:
-        # Print file size
-        print('File size: ', round(zp.length / 1e6), 'Mb', sep='')
+        print('Reading', url)
         with ZipFile(BytesIO(zp.read())) as zpfile:
-            print('Extracting ...')
-            zpfile.extractall(dir_name)
+            # Print file size
+            size = sum([zinfo.file_size for zinfo in zpfile.filelist])
+            print('Files:', len(zpfile.infolist()))
+            print('Total size: ', round(size / 1e6, 2), 'Mb', sep='')
+            for member in tqdm(zpfile.infolist(), desc='Extracting '):
+                try:
+                    zpfile.extract(member, dir_name)
+                except error as e:
+                    pass
     print('Done!')
 
 # Download all RRUFF data from urls
@@ -55,15 +61,15 @@ def download_all_rruff():
     links = []
     for link in soup.findAll('a'):
         links.append(link.get('href'))
-    zip_idx = [i for i, word in enumerate(links) if word.endswith('zip')]
+    zip_idx = [i for i, word in enumerate(links) if word.endswith('zip') and not word.startswith('LR')]
     zip_links = [links[i] for i in zip_idx]
     # Construct urls
     zip_urls = [url + lnk for lnk in zip_links]
     # Print links
-    print('Downloading:', *zip_urls, sep='\n')
+    print('Found files:', *zip_urls, sep='\n')
     # Download, and extract
     for url in zip_urls:
-        download_from_url(url)
+        download_rruff_from_url(url)
 
 # Define RamanSample class
 class RamanSample(object):
@@ -135,7 +141,4 @@ def create_from_file(file_path):
     return RamanSample(**attrs)
 
 if __name__ == "__main__":
-    path = sys.argv[1]
-    r = create_from_file(path)
-    print('mineral: ', r.mineral)
-    print('spectrum: ', r.spectrum)
+    download_all_rruff()
