@@ -5,17 +5,17 @@ __all__ = [
     'get_spectrum_and_label_from_file'
 ]
 
-from io import BytesIO
-from bs4 import BeautifulSoup
 from urllib.request import Request, urlopen
+from bs4 import BeautifulSoup
 from zipfile import ZipFile
 from zipfile import error
+from io import BytesIO
 from tqdm import tqdm
-import glob
-import sys
-import csv
+
 import numpy as np
 import warnings
+import glob
+import sys
 import re
 import os
 
