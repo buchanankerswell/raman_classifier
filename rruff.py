@@ -11,7 +11,6 @@ from zipfile import ZipFile
 from zipfile import error
 from io import BytesIO
 from tqdm import tqdm
-
 import numpy as np
 import warnings
 import glob
@@ -23,11 +22,11 @@ import os
 # https://rruff.info/zipped_data_files/raman/
 def download_rruff_from_url(url):
     # Create directory if it doesn't exist
-    if not os.path.exists('rruff_data'):
+    if not os.path.exists('data'):
         print('Creating directory ./ruff_data')
-        os.makedirs('rruff_data')
+        os.makedirs('data')
     # Extract RRUFF spectrum type
-    dir_name = 'rruff_data/' + re.split('/', url)[-1].split('.')[0]
+    dir_name = 'data/' + re.split('/', url)[-1].split('.')[0]
     # Open, read, and extract zip into directory
     with urlopen(url) as zp:
         print('Reading', url)
@@ -40,15 +39,16 @@ def download_rruff_from_url(url):
                 try:
                     zpfile.extract(member, dir_name)
                 except error as e:
+                    warnings.warn('Something went wrong extracting ', member)
                     pass
     print('Done!')
 
 # Download all RRUFF data from urls
 def download_all_rruff():
     # Create directory if it doesn't exist
-    if not os.path.exists('rruff_data'):
-        print('Creating directory ./ruff_data')
-        os.makedirs('rruff_data')
+    if not os.path.exists('data'):
+        print('Creating directory ./data')
+        os.makedirs('data')
     # RRUFF url
     url = 'https://rruff.info/zipped_data_files/raman/'
     # Request page
@@ -74,8 +74,8 @@ def download_all_rruff():
 # Define RamanSample class
 class RamanSample(object):
     def __init__(self, mineral, rruffid, spectrum, ideal_chemistry=None,
-            locality=None, owner=None, source=None,
-            description=None, status=None, url=None, measured_chemistry=None):
+            locality=None, owner=None, source=None, orientation=None,
+            description=None, status=None, url=None, pinid=None, measured_chemistry=None):
         self.mineral = mineral
         self.rruffid = rruffid
         self.spectrum = spectrum
@@ -83,9 +83,11 @@ class RamanSample(object):
         self.locality = locality
         self.owner = owner
         self.source = source
+        self.orientation = orientation
         self.description = description
         self.status = status
         self.url = url
+        self.pinid = pinid
         self.measured_chemistry = measured_chemistry
 
 # Method for parsing lines from RRUFF .txt files
@@ -97,6 +99,8 @@ def _parse_line(l):
         k = k_raw[2:].lower().replace(" ", "_")
         if k == "names":
             k = "mineral"
+        if k == "pin_id":
+            k = "pinid"
         if k == "end":
             return None, None
     else:
@@ -107,7 +111,6 @@ def _parse_line(l):
             warnings.warn("Could not convert to string: {}".format(l))
             x_val, y_val = (float(l.split(", ")[0]), 0)
         v = np.array([x_val, y_val])
-
     return k, v
 
 # Method for parsing whole RRUFF .txt files
@@ -136,7 +139,7 @@ def get_spectrum_and_label_from_file(file_path):
 
 # Method for reading  RRUFF .txt file and
 # saving as RamanSample class object
-def create_from_file(file_path):
+def get_sample_from_file(file_path):
     attrs = _parse_raw_file(file_path)
     return RamanSample(**attrs)
 
