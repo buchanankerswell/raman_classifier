@@ -6,3 +6,4 @@ training_images
 rruff_data
 test_images
 *.png
+*.npz

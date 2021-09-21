@@ -5,58 +5,25 @@
 # after Liu et al. (2017)
 # https://arxiv.org/abs/1708.09022
 
-__all__ = [
-    'download_all_rruff',
-    'download_rruff_from_url',
-    'create_from_file',
-    'get_spectrum_and_label_from_file',
-    'convert_spectrum_to_image'
-]
-
+from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
 from urllib.request import Request, urlopen
-from skimage.transform import resize
 from bs4 import BeautifulSoup
 from zipfile import ZipFile
-from zipfile import error
 from io import BytesIO
 from tqdm import tqdm
-from PIL import Image
 from glob import glob
 from math import ceil
 import numpy as np
 import contextlib
 import warnings
-import shutil
 import random
-import sys
-import png
-import io
 import re
 import os
 
-# Define RamanSample class
-class RamanSample(object):
-    def __init__(self, mineral, rruffid, spectrum, ideal_chemistry=None,
-            locality=None, owner=None, source=None, orientation=None,
-            description=None, status=None, url=None, pin=None, measured_chemistry=None):
-        self.mineral = mineral
-        self.rruffid = rruffid
-        self.spectrum = spectrum
-        self.ideal_chemistry = ideal_chemistry
-        self.locality = locality
-        self.owner = owner
-        self.source = source
-        self.orientation = orientation
-        self.description = description
-        self.status = status
-        self.url = url
-        self.pin = pin
-        self.measured_chemistry = measured_chemistry
-
 # Method for downloading and extracting data directly from RRUFF
 # https://rruff.info/zipped_data_files/raman/
-def download_rruff_from_url(url):
+def _download_rruff_from_url(url):
     # Create directory if it doesn't exist
     if not os.path.exists('rruff_data'):
         print('Creating directory ./ruff_data')
@@ -106,7 +73,7 @@ def download_all_rruff():
     print('Found urls:', *zip_urls, sep='\n')
     # Download, and extract
     for url in zip_urls:
-        download_rruff_from_url(url)
+        _download_rruff_from_url(url)
 
 # Method for parsing lines from RRUFF .txt files
 def _parse_line(l):
@@ -126,7 +93,6 @@ def _parse_line(l):
         try:
             x_val, y_val = [float(x.strip()) for x in l.split(', ')]
         except ValueError:
-            warnings.warn('Could not parse line: {}'.format(l), Warning)
             v = []
         else:
             v = [x_val, y_val]
@@ -146,104 +112,117 @@ def _parse_raw_file(file_path):
                 else:
                     attrs[k] = v
     if None in attrs['spectrum']:
-        warnings.warn('No spectrum exists', Warning)
         attrs['spectrum'] = None
     else:
         attrs['spectrum'] = np.array(attrs['spectrum'])
     return attrs
 
+# Method for padding 2D array to specific shape
+def _pad_array_to_specific_shape(array, new_height, new_width):
+    h = array.shape[0]
+    w = array.shape[1]
+    top = (new_height - h) // 2
+    bottom = new_height - top - h
+    left = (new_width - w) // 2
+    right = new_width - left - w
+    return np.pad(
+        array,
+        pad_width=((top, bottom), (left, right)),
+        mode='constant',
+        constant_values=np.nan
+    )
+
 # Method for reading  RRUFF .txt file and
 # saving as numpy ndarray with label
-def get_spectrum_and_label_from_file(file_path):
+def _get_spectrum_from_file(file_path):
     attrs = _parse_raw_file(file_path)
     spectrum = attrs.get('spectrum')
-    label = attrs.get('mineral')
-    if spectrum.size == 0:
-        warnings.warn('No spectrum exists', Warning)
-    return (spectrum, label)
-
-# Method for reading  RRUFF .txt file and
-# saving as RamanSample class object
-def get_sample_from_file(file_path):
-    attrs = _parse_raw_file(file_path)
-    if attrs['spectrum'].size == 0:
-        warnings.warn('No spectrum exists', Warning)
-    return RamanSample(**attrs)
-
-# Method for converting spectra into 16-bit png images
-# Note: this step is necessary to run keras ImageDataGenerator flow_from_directory method
-# https://keras.io/api/preprocessing/image/
-def convert_spectrum_to_image(file_path):
-    # Get spectrum
-    spc = get_sample_from_file(file_path).spectrum
-    # If no spectrum exists skip processing
-    if spc.size == 0:
-        warnings.warn('No spectrum exists for file: {}'.format(file_path), Warning)
+    try:
+        if spectrum.size == 0:
+            raise ValueError('No spectrum exists')
+    except ValueError:
+        raise
     else:
-        # Split file path
-        basename, ext = os.path.splitext(os.path.basename(file_path))
-        # Parse basename of file path
-        mineral, \
-        rruff_id, \
-        spectra_type, \
-        wavelength, \
-        rotation, \
-        orientation, \
-        data_status, \
-        unique_id = basename.split('__')
-        # Create path to new directory
-        new_dir = 'training_images/{}'.format(mineral).lower()
-        # Make new directory if it doesn't exist
-        if not os.path.isdir(new_dir):
-            os.makedirs(new_dir, exist_ok=True)
-        # Normalizing spectrum
+        label = attrs.get('mineral')
+        return (spectrum, label)
+
+# Method for normalizing spectra by padding to specified length
+# and scaling to a specified range
+def _normalize_spectrum(spectrum, padded_length=8000, scaled_range=(0,1)):
+    try:
+        if spectrum.size == 0:
+            raise ValueError('No spectrum exists')
+    except ValueError:
+        raise
+    else:
+        # Normalize spectrum
+        spc_length = spectrum.shape[0]
+        spc_padded = _pad_array_to_specific_shape(spectrum, padded_length, 2)
         # Scale to range [0,1]
-        spc_scaled = MinMaxScaler(feature_range=(0,1)).fit_transform(spc)
-        # Resize array
-        spc_resize = resize(spc_scaled, output_shape=(150,150), anti_aliasing='True')
-        # Convert array from float64 to 16 bit unsigned integers for better png image
-        spc_int = (65535*((spc_resize-spc_resize.min())/spc_resize.ptp())).astype(np.uint16)
-        # Save as png image
-        img_path = os.path.join(new_dir,basename.lower()) + '.png'
-        with open(img_path, 'wb') as f:
-            writer = png.Writer(
-                width=spc_int.shape[1],
-                height=spc_int.shape[0],
-                bitdepth=16,
-                greyscale=True
-            )
-            img = spc_int.tolist()
-            writer.write(f, img)
+        spc_scaled = MinMaxScaler(feature_range=scaled_range).fit_transform(spc_padded)
+        return(spc_scaled)
 
 # Method for splitting training/test set
-def train_test_split(test_ratio):
-    # Make new directory for test set if it doesn't exist
-    if not os.path.isdir('test_images'):
-        os.makedirs('test_images', exist_ok=True)
-    # Get training image paths
-    train_images = glob('training_images/*/*.png')
+def normalize_and_split_dataset(data_dir, test_ratio=0.15, val_ratio=0.15):
+    # All samples
+    raw_files = glob('{}/*/*.txt'.format(data_dir))
+    # List and indexes
+    norm_spc = []
+    labels = []
+    # Read and normalize each sample
+    for file in tqdm(raw_files, desc='Processing spectra'):
+        try:
+            smp = _get_spectrum_from_file(file)
+        except ValueError:
+            warnings.warn('No spectrum exists ... skipping sample: {}'.format(file), Warning)
+        else:
+            norm_spc.append(_normalize_spectrum(smp[0]))
+            labels.append(smp[1])
+    # Turn lists into numpy arrays
+    norm_spc = np.stack(norm_spc)
+    labels = np.array(labels)
     # Number of test images
-    n = ceil(len(train_images)*test_ratio)
-    # Move files
-    for file in tqdm(random.sample(train_images, n), desc='Splitting training/test data'):
-        # Split file path
-        basename, ext = os.path.splitext(os.path.basename(file))
-        # Parse basename of file path
-        mineral, \
-        rruff_id, \
-        spectra_type, \
-        wavelength, \
-        rotation, \
-        orientation, \
-        data_status, \
-        unique_id = basename.split('__')
-        # Create path to new directory
-        new_dir = 'test_images/{}'.format(mineral).lower()
-        # Make new directory if it doesn't exist
-        if not os.path.isdir(new_dir):
-            os.makedirs(new_dir, exist_ok=True)
-        img_path = os.path.join(new_dir, basename) + '.png'
-        shutil.move(file, img_path)
+    n_test = ceil(len(norm_spc)*test_ratio)
+    # Split into training, validation, and test sets
+    test_size = test_ratio
+    val_size = val_ratio/(1-test_ratio)
+    print('Splitting dataset into {:.0f}% train, {:.0f}% val, and {:.0f}% test sets'.format(
+        (1-(test_ratio+val_ratio))*100,
+        val_ratio*100,
+        test_ratio*100
+    ))
+    train_spectra, test_spectra, train_labels, test_labels \
+        = train_test_split(
+            norm_spc,
+            labels,
+            test_size=test_size,
+            random_state=19
+        )
+    train_spectra, val_spectra, train_labels, val_labels \
+        = train_test_split(
+            norm_spc,
+            labels,
+            test_size=val_size,
+            random_state=19
+        )
+    print('Train: {} spectra with {} classes\nValidation: {} spectra with {} classes\nTest: {} spectra with {} classes'.format(
+        len(train_spectra),
+        len(np.unique(train_labels)),
+        len(val_spectra),
+        len(np.unique(val_labels)),
+        len(test_spectra),
+        len(np.unique(test_labels))
+    ))
+    # Saving as compressed numpyz file (.npz)
+    np.savez_compressed(
+        'processed_spectra',
+        train_spectra=train_spectra,
+        train_labels=train_labels,
+        val_spectra=val_spectra,
+        val_labels=val_labels,
+        test_spectra=test_spectra,
+        test_labels=test_labels
+    )
 
 # Running as script
 if __name__ == '__main__':
@@ -251,14 +230,6 @@ if __name__ == '__main__':
     # https://rruff.info/zipped_data_files/raman/
     print('Downloading RRUFF database ...')
     download_all_rruff()
-    # Raw files list
-    raw_files = glob('rruff_data/*/*.txt')
-    print('Number of raw spectra:', len(raw_files))
-    # Convert all spectra to b&w images and
-    # move into new data structure
-    for file_path in tqdm(raw_files, desc = 'Processing spectra'):
-        convert_spectrum_to_image(file_path)
-    # Split training/test sets 80/20
-    train_test_split(0.2)
+    normalize_and_split_dataset('rruff_data')
     print('Done!')
 
