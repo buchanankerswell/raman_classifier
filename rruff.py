@@ -1,19 +1,18 @@
 # Methods for downloading and preprocessing
 # the RRUFF database for tensorflow/keras workflow
-# Note: much of this code was developed from Derek Kanes
+# Note: inspired by Derek Kanes
 # https://github.com/DerekKaknes/raman/
 # after Liu et al. (2017)
 # https://arxiv.org/abs/1708.09022
 
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import MinMaxScaler
 from urllib.request import Request, urlopen
+from collections import Counter
 from bs4 import BeautifulSoup
+from math import ceil, floor
 from zipfile import ZipFile
 from io import BytesIO
 from tqdm import tqdm
-from glob import glob
-from math import ceil
 import numpy as np
 import contextlib
 import warnings
@@ -117,24 +116,9 @@ def _parse_raw_file(file_path):
         attrs['spectrum'] = np.array(attrs['spectrum'])
     return attrs
 
-# Method for padding 2D array to specific shape
-def _pad_array_to_specific_shape(array, new_height, new_width):
-    h = array.shape[0]
-    w = array.shape[1]
-    top = (new_height - h) // 2
-    bottom = new_height - top - h
-    left = (new_width - w) // 2
-    right = new_width - left - w
-    return np.pad(
-        array,
-        pad_width=((top, bottom), (left, right)),
-        mode='constant',
-        constant_values=np.nan
-    )
-
 # Method for reading  RRUFF .txt file and
 # saving as numpy ndarray with label
-def _get_spectrum_from_file(file_path):
+def get_spectrum_from_file(file_path):
     attrs = _parse_raw_file(file_path)
     spectrum = attrs.get('spectrum')
     try:
@@ -146,43 +130,67 @@ def _get_spectrum_from_file(file_path):
         label = attrs.get('mineral')
         return (spectrum, label)
 
-# Method for normalizing spectra by padding to specified length
-# and scaling to a specified range
-def _normalize_spectrum(spectrum, padded_length=8000, scaled_range=(0,1)):
-    try:
-        if spectrum.size == 0:
-            raise ValueError('No spectrum exists')
-    except ValueError:
-        raise
-    else:
-        # Normalize spectrum
-        spc_length = spectrum.shape[0]
-        spc_padded = _pad_array_to_specific_shape(spectrum, padded_length, 2)
-        # Scale to range [0,1]
-        spc_scaled = MinMaxScaler(feature_range=scaled_range).fit_transform(spc_padded)
-        return(spc_scaled)
+# Method for resampling spectrum at equally spaced intervals
+# Note: returns 1D array
+def resample_spectrum(spectrum, resample_num=512):
+    wavenumber = spectrum[:,0]
+    intensity = spectrum[:,1]
+    wavenumber_begin = ceil(min(wavenumber))
+    wavenumber_end = floor(max(wavenumber))
+    wavenumber_range = np.linspace(wavenumber_begin, wavenumber_end, num=resample_num)
+    intensity_resample = np.interp(wavenumber_range, wavenumber, intensity)
+    return(np.vstack((wavenumber_range, intensity_resample)).T)
+
+# Method for augmenting spectra
+# Note: randomly shifts wavenumbers and
+# randomly scales intensities
+def augment_spectrum(spectrum, shift=3, scale=0.2):
+    wavenumber = spectrum[:,0]
+    intensity = spectrum[:,1]
+    # Shift wavenumbers randomly
+    wavenumber_shifted = wavenumber + random.randint(-shift, shift)
+    # Scale intensity randomly
+    intensity_scaled = intensity + (intensity * random.uniform(-scale, scale))
+    return(np.vstack((wavenumber_shifted, intensity_scaled)).T)
+
+# Method for preprocessing dataset
+def preprocess_dataset(raw_files, resample_num=512, shift=3, scale=0.2, augment_count=50):
+    # Get unique mineral counts
+    mins_list = sorted([os.path.split(file)[1].split('__')[0] for file in raw_files])
+    mins, counts = np.unique(mins_list, return_counts=True)
+    # Initialize lists
+    spc = []
+    label = []
+    # Get sample
+    pbar = tqdm(
+        mins,
+        desc='Processing unique minerals',
+        bar_format='{desc}:{percentage:3.0f}%|{bar}|{n_fmt}/{total_fmt}'
+    )
+    for mineral in pbar:
+        sample_paths = [file for file in raw_files if mineral in file]
+        for file in random.choices(sample_paths, k=augment_count):
+            try:
+                smp = get_spectrum_from_file(file)
+            except ValueError:
+                # Skip sample if no spectrum exists
+                warnings.warn('No spectrum exists for {}'.format(file), Warning)
+            else:
+                spc_augmented = augment_spectrum(spectrum=smp[0], shift=shift, scale=scale)
+                spc_resampled = resample_spectrum(spc_augmented, resample_num=resample_num)
+                spc_scaled = spc_resampled / spc_resampled.max(axis=0)
+                spc.append(spc_scaled)
+                label.append(mineral)
+    # Turn lists into numpy arrays
+    spc = [np.expand_dims(np.reshape(spc[i], (32,32), 'C'), axis=-1) for i in range(len(spc))]
+    spc = np.stack(spc)
+    label = np.array(label)
+    return(spc, label)
 
 # Method for splitting training/test set
-def normalize_and_split_dataset(data_dir, test_ratio=0.15, val_ratio=0.15):
-    # All samples
-    raw_files = glob('{}/*/*.txt'.format(data_dir))
-    # List and indexes
-    norm_spc = []
-    labels = []
-    # Read and normalize each sample
-    for file in tqdm(raw_files, desc='Processing spectra'):
-        try:
-            smp = _get_spectrum_from_file(file)
-        except ValueError:
-            warnings.warn('No spectrum exists ... skipping sample: {}'.format(file), Warning)
-        else:
-            norm_spc.append(_normalize_spectrum(smp[0]))
-            labels.append(smp[1])
-    # Turn lists into numpy arrays
-    norm_spc = np.stack(norm_spc)
-    labels = np.array(labels)
-    # Number of test images
-    n_test = ceil(len(norm_spc)*test_ratio)
+def split_dataset(spectra, labels, test_ratio=0.15, val_ratio=0.15):
+    # Number of test spectra
+    n_test = ceil(len(spectra)*test_ratio)
     # Split into training, validation, and test sets
     test_size = test_ratio
     val_size = val_ratio/(1-test_ratio)
@@ -192,19 +200,9 @@ def normalize_and_split_dataset(data_dir, test_ratio=0.15, val_ratio=0.15):
         test_ratio*100
     ))
     train_spectra, test_spectra, train_labels, test_labels \
-        = train_test_split(
-            norm_spc,
-            labels,
-            test_size=test_size,
-            random_state=19
-        )
+        = train_test_split(spectra, labels, test_size=test_size)
     train_spectra, val_spectra, train_labels, val_labels \
-        = train_test_split(
-            norm_spc,
-            labels,
-            test_size=val_size,
-            random_state=19
-        )
+        = train_test_split(spectra, labels, test_size=val_size)
     print('Train: {} spectra with {} classes\nValidation: {} spectra with {} classes\nTest: {} spectra with {} classes'.format(
         len(train_spectra),
         len(np.unique(train_labels)),
@@ -213,23 +211,4 @@ def normalize_and_split_dataset(data_dir, test_ratio=0.15, val_ratio=0.15):
         len(test_spectra),
         len(np.unique(test_labels))
     ))
-    # Saving as compressed numpyz file (.npz)
-    np.savez_compressed(
-        'processed_spectra',
-        train_spectra=train_spectra,
-        train_labels=train_labels,
-        val_spectra=val_spectra,
-        val_labels=val_labels,
-        test_spectra=test_spectra,
-        test_labels=test_labels
-    )
-
-# Running as script
-if __name__ == '__main__':
-    # Download all RRUFF spectra from:
-    # https://rruff.info/zipped_data_files/raman/
-    print('Downloading RRUFF database ...')
-    download_all_rruff()
-    normalize_and_split_dataset('rruff_data')
-    print('Done!')
-
+    return(train_spectra, train_labels, val_spectra, val_labels, test_spectra, test_labels)

@@ -1,0 +1,5 @@
+# To do
+- training data needs to be augmented and class-balanced
+- model needs to include resampling as first layer so raw spectra can be input
+  - this will ensure end-to-end functionality
+- train the model on raw or base-line corrected spectra?
