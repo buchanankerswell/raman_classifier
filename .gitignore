@@ -1,9 +1,4 @@
 spectra_images
 __pycache__
-data
 .DS_Store
-training_images
 rruff_data
-test_images
-*.png
-*.npz

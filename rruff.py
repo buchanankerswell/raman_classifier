@@ -5,8 +5,12 @@
 # after Liu et al. (2017)
 # https://arxiv.org/abs/1708.09022
 
+from tensorflow.keras import Sequential
+from tensorflow.keras.layers import Dense, Conv2D, MaxPooling2D, Dropout, BatchNormalization, LeakyReLU, Activation, Flatten
+
 from sklearn.model_selection import train_test_split
 from urllib.request import Request, urlopen
+import scipy.ndimage as sp_filter
 from collections import Counter
 from bs4 import BeautifulSoup
 from math import ceil, floor
@@ -132,29 +136,39 @@ def get_spectrum_from_file(file_path):
 
 # Method for resampling spectrum at equally spaced intervals
 # Note: returns 1D array
-def resample_spectrum(spectrum, resample_num=512):
+def resample_spectrum(spectrum, resample_num=512, wavenumbers=False):
     wavenumber = spectrum[:,0]
     intensity = spectrum[:,1]
     wavenumber_begin = ceil(min(wavenumber))
     wavenumber_end = floor(max(wavenumber))
     wavenumber_range = np.linspace(wavenumber_begin, wavenumber_end, num=resample_num)
     intensity_resample = np.interp(wavenumber_range, wavenumber, intensity)
-    return(np.vstack((wavenumber_range, intensity_resample)).T)
+    if wavenumbers:
+        return(np.vstack((wavenumber_range, intensity_resample)).T)
+    else:
+        return(intensity_resample)
 
 # Method for augmenting spectra
 # Note: randomly shifts wavenumbers and
 # randomly scales intensities
-def augment_spectrum(spectrum, shift=3, scale=0.2):
+def augment_spectrum(spectrum, shift=3, scale=0.2, kernel_width=10, wavenumbers=False):
     wavenumber = spectrum[:,0]
     intensity = spectrum[:,1]
     # Shift wavenumbers randomly
-    wavenumber_shifted = wavenumber + random.randint(-shift, shift)
+    wavenumber_shifted = wavenumber + random.uniform(-shift, shift)
     # Scale intensity randomly
-    intensity_scaled = intensity + (intensity * random.uniform(-scale, scale))
-    return(np.vstack((wavenumber_shifted, intensity_scaled)).T)
+    conv_weights = [random.uniform(-scale*0.1, scale) for _ in range(kernel_width)]
+    intensity_scaled = sp_filter.convolve1d(intensity, weights=conv_weights)
+    if wavenumbers:
+        return(np.vstack((wavenumber_shifted, intensity_scaled)).T)
+    else:
+        return(intensity_scaled)
 
 # Method for preprocessing dataset
-def preprocess_dataset(raw_files, resample_num=512, shift=3, scale=0.2, augment_count=50):
+# 0. Increase dataset size by augmenting samples with less than n measured spectra
+# 1. Resample spectra to standardize array shapes
+# 2. Reshape spectra into square 32x32x1 tensors
+def preprocess_dataset(raw_files, shift=3, scale=0.2, kernel_width=10, wavenumbers=False, augment_count=50):
     # Get unique mineral counts
     mins_list = sorted([os.path.split(file)[1].split('__')[0] for file in raw_files])
     mins, counts = np.unique(mins_list, return_counts=True)
@@ -168,7 +182,9 @@ def preprocess_dataset(raw_files, resample_num=512, shift=3, scale=0.2, augment_
         bar_format='{desc}:{percentage:3.0f}%|{bar}|{n_fmt}/{total_fmt}'
     )
     for mineral in pbar:
+        # Get all measured spectra paths for a specific mineral
         sample_paths = [file for file in raw_files if mineral in file]
+        # Randomly sample (with replacement) k spectra and augment
         for file in random.choices(sample_paths, k=augment_count):
             try:
                 smp = get_spectrum_from_file(file)
@@ -176,13 +192,23 @@ def preprocess_dataset(raw_files, resample_num=512, shift=3, scale=0.2, augment_
                 # Skip sample if no spectrum exists
                 warnings.warn('No spectrum exists for {}'.format(file), Warning)
             else:
-                spc_augmented = augment_spectrum(spectrum=smp[0], shift=shift, scale=scale)
-                spc_resampled = resample_spectrum(spc_augmented, resample_num=resample_num)
+                # Augment spectrum
+                spc_augmented = augment_spectrum(smp[0], shift, scale, kernel_width, True)
+                # Subsampling resolution is 512 for 2D array with wavenumbers
+                if wavenumbers:
+                    spc_resampled = resample_spectrum(spc_augmented, 512, True)
+                # Otherwise use 1024 for 1D array with only intensity signal
+                else:
+                    spc_resampled = resample_spectrum(spc_augmented, 1024)
+                # Scale spectrum
                 spc_scaled = spc_resampled / spc_resampled.max(axis=0)
-                spc.append(spc_scaled)
+                # Add channel dimension
+                spc_expanded = np.expand_dims(spc_scaled, axis=-1)
+                # Append to list
+                spc.append(spc_expanded)
                 label.append(mineral)
     # Turn lists into numpy arrays
-    spc = [np.expand_dims(np.reshape(spc[i], (32,32), 'C'), axis=-1) for i in range(len(spc))]
+    spc = [np.reshape(spectrum, (32,32, 1), 'C') for spectrum in spc]
     spc = np.stack(spc)
     label = np.array(label)
     return(spc, label)
@@ -212,3 +238,35 @@ def split_dataset(spectra, labels, test_ratio=0.15, val_ratio=0.15):
         len(np.unique(test_labels))
     ))
     return(train_spectra, train_labels, val_spectra, val_labels, test_spectra, test_labels)
+
+# Model 1: modified LeNet5-2D
+# https://arxiv.org/pdf/1708.09022.pdf
+# Notes:
+# - Uses ReLU
+# - Uses dropout
+# - Uses MaxPooling
+# - Uses BatchNormalization
+def modified_LeNet(input_shape, num_classes):
+    return(
+        Sequential([
+            Conv2D(16, 5, input_shape=input_shape[1:], data_format='channels_last'),
+            BatchNormalization(),
+            LeakyReLU(),
+            MaxPooling2D(2),
+            Conv2D(32, 5),
+            BatchNormalization(),
+            LeakyReLU(),
+            MaxPooling2D(2),
+            Conv2D(64, 5),
+            BatchNormalization(),
+            LeakyReLU(),
+            Flatten(),
+            Dense(2048),
+            BatchNormalization(),
+            Activation('tanh'),
+            Dropout(0.5),
+            Dense(num_classes),
+            BatchNormalization(),
+            Activation('softmax')
+        ])
+    )

@@ -1,7 +1,6 @@
 # Import modules and methods
-from rruff import download_all_rruff, preprocess_dataset, split_dataset
+from rruff import download_all_rruff, preprocess_dataset, split_dataset, modified_LeNet
 
-from tensorflow.keras.layers import Dense, Conv2D, MaxPooling2D, AveragePooling2D, Dropout, BatchNormalization, LeakyReLU, Activation, Flatten
 from tensorflow.keras.losses import SparseCategoricalCrossentropy
 from tensorflow.keras.callbacks import EarlyStopping, CSVLogger
 from tensorflow.keras.models import Sequential
@@ -21,8 +20,12 @@ import os
 if not os.path.isdir('rruff_data'):
     download_all_ruff()
 
-# Get all samples
+# Get all sample paths
 raw_files = glob('rruff_data/*/*.txt')
+# Get all RAW sample paths (no baseline corrected)
+raw_raw_files = [file for file in raw_files if 'RAW' in file]
+# Get all processed sample paths (baseline corrected)
+raw_processed_files = [file for file in raw_files if 'Processed' in file]
 
 # Preprocessing
 # 0. Increase dataset size by augmenting samples with less than n measured spectra
@@ -31,16 +34,20 @@ raw_files = glob('rruff_data/*/*.txt')
 # 3. Encode categorical labels as unique integers
 # 4. Split dataset into training, validation, and test sets
 # 5. Build tensorflow datasets and define batch size, shuffle, and performance tuning
+spectra, labels = preprocess_dataset(raw_processed_files)
 
-# Augmenting and resampling spectra
-spectra, labels = preprocess_dataset(raw_files)
+# Print unique mineral spectra counts
+minerals, counts = np.unique(labels, return_counts=True)
+print('Augmented dataset has {} unique minerals with at least {} augmented spectra each'
+      .format(len(counts), np.min(counts)))
 
 # Encode categorical labels
 label_encoder = LabelEncoder().fit(labels)
 labels_encoded = label_encoder.transform(labels)
 
 # Split dataset into training, validation, and test sets
-train_spectra, train_labels, val_spectra, val_labels, test_spectra, test_labels = split_dataset(spectra, labels_encoded, val_ratio=0.1, test_ratio=0.1)
+train_spectra, train_labels, val_spectra, val_labels, test_spectra, test_labels \
+  = split_dataset(spectra, labels_encoded, val_ratio=0.1, test_ratio=0.1)
 
 # Build tensorflow datasets
 train_ds = Dataset.from_tensor_slices((train_spectra, train_labels))
@@ -85,47 +92,27 @@ input_shape = (batch_size, train_spectra.shape[1], train_spectra.shape[2], 1)
 # - Uses dropout
 # - Uses MaxPooling
 # - Uses BatchNormalization
-modified_LeNet = Sequential([
-    Conv2D(16, 5, input_shape=input_shape[1:], data_format='channels_last'),
-    BatchNormalization(),
-    LeakyReLU(),
-    MaxPooling2D(2),
-    Conv2D(32, 5),
-    BatchNormalization(),
-    LeakyReLU(),
-    MaxPooling2D(2),
-    Conv2D(64, 5),
-    BatchNormalization(),
-    LeakyReLU(),
-    Flatten(),
-    Dense(2048),
-    BatchNormalization(),
-    Activation('tanh'),
-    Dropout(0.5),
-    Dense(num_classes),
-    BatchNormalization(),
-    Activation('softmax')
-])
+model = modified_LeNet(input_shape, num_classes)
 
 # Compile model
-modified_LeNet.compile(
+model.compile(
     optimizer='adam',
     loss=SparseCategoricalCrossentropy(),
     metrics=['accuracy']
 )
 
 # Model summary
-modified_LeNet.summary()
+model.summary()
 
 # Log training history to csv file
 csv_logger = CSVLogger('modified_LeNet_history.csv', append=True)
 
 # Stop model if validation accuracy doesn't improve after 5 epochs
-early_stop = EarlyStopping(patience=5, restore_best_weights=True)
+early_stop = EarlyStopping(patience=15, restore_best_weights=True)
 
 # Train model
-epochs = 15
-modified_LeNet_history = modified_LeNet.fit(
+epochs = 50
+history = model.fit(
     train_ds,
     validation_data=val_ds,
     epochs=epochs,
@@ -133,10 +120,10 @@ modified_LeNet_history = modified_LeNet.fit(
 )
 
 # Visualize results
-acc = modified_LeNet_history.history['accuracy']
-val_acc = modified_LeNet_history.history['val_accuracy']
-loss = modified_LeNet_history.history['loss']
-val_loss = modified_LeNet_history.history['val_loss']
+acc = history.history['accuracy']
+val_acc = history.history['val_accuracy']
+loss = history.history['loss']
+val_loss = history.history['val_loss']
 epochs_range = range(epochs)
 
 plt.figure(figsize=(11, 5.5))
@@ -154,3 +141,7 @@ plt.title('Training and Validation Loss')
 
 plt.savefig('validation.png')
 plt.show(block=False)
+
+# Predict test set
+results = model.evaluate(test_ds)
+print('Model predicts test set with {:2.1f}% accuracy'.format(results[1]*100))
