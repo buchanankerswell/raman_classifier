@@ -18,7 +18,7 @@ import os
 
 # Download RRUFF dataset
 if not os.path.isdir('rruff_data'):
-    download_all_ruff()
+    download_all_rruff()
 
 # Get all sample paths
 raw_files = glob('rruff_data/*/*.txt')
@@ -108,15 +108,15 @@ model.summary()
 csv_logger = CSVLogger('modified_LeNet_history.csv', append=True)
 
 # Stop model if validation accuracy doesn't improve after 5 epochs
-early_stop = EarlyStopping(patience=15, restore_best_weights=True)
+early_stop = EarlyStopping(patience=5, baseline=0.99, restore_best_weights=True)
 
 # Train model
-epochs = 50
+epochs = 20
 history = model.fit(
     train_ds,
     validation_data=val_ds,
     epochs=epochs,
-    callbacks=[csv_logger, early_stop]
+    callbacks=[csv_logger]
 )
 
 # Visualize results
@@ -142,6 +142,6 @@ plt.title('Training and Validation Loss')
 plt.savefig('validation.png')
 plt.show(block=False)
 
-# Predict test set
+# Evaluate model on test set
 results = model.evaluate(test_ds)
 print('Model predicts test set with {:2.1f}% accuracy'.format(results[1]*100))
